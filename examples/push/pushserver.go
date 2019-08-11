@@ -4,6 +4,7 @@ import (
 	"flag"
 	"log"
 	"net"
+	"time"
 
 	"github.com/ICKelin/galive"
 )
@@ -33,17 +34,11 @@ func main() {
 
 func onConn(conn net.Conn) {
 	defer conn.Close()
-	buf := make([]byte, 1024)
-	for {
-		nr, err := conn.Read(buf)
-		if err != nil {
-			log.Println(err)
-			break
-		}
+	tc := time.NewTicker(time.Second * 3)
+	defer tc.Stop()
 
-		log.Println(string(buf[:nr]))
-
-		_, err = conn.Write(buf[:nr])
+	for range tc.C {
+		_, err := conn.Write([]byte("push message from server"))
 		if err != nil {
 			log.Println(err)
 			return

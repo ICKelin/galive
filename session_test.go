@@ -49,7 +49,6 @@ func client(t *testing.T) {
 		return
 	}
 
-	// NewClient(conn)
 	sess := NewClientSession(conn)
 	tc := time.NewTicker(time.Second * 1)
 	defer tc.Stop()

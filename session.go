@@ -14,16 +14,24 @@ import (
 
 type Session struct {
 	conn          net.Conn
-	sendBuf       chan []byte
+	sendBuf       chan *writeReq
 	recvBufMu     sync.Mutex
 	recvBuf       [][]byte
 	dataReady     chan struct{}
-	readDeadline  atomic.Value
 	writeDeadline atomic.Value
 
-	chReadError chan struct{}
-	readError   atomic.Value
-	isclose     int32
+	chReadError  chan struct{}
+	readError    atomic.Value
+	readDeadline atomic.Value
+	isclose      int32
+}
+
+type writeReq struct {
+	buf            []byte
+	nwrite         int
+	chWriteSuccess chan struct{}
+	chWriteError   chan struct{}
+	writeError     atomic.Value
 }
 
 func NewServerSession(conn net.Conn) *Session {
@@ -31,7 +39,7 @@ func NewServerSession(conn net.Conn) *Session {
 		conn:        conn,
 		chReadError: make(chan struct{}),
 		dataReady:   make(chan struct{}),
-		sendBuf:     make(chan []byte),
+		sendBuf:     make(chan *writeReq),
 		recvBuf:     make([][]byte, 0),
 	}
 	go s.open()
@@ -43,19 +51,11 @@ func NewClientSession(conn net.Conn) *Session {
 		conn:        conn,
 		chReadError: make(chan struct{}),
 		dataReady:   make(chan struct{}),
-		sendBuf:     make(chan []byte),
+		sendBuf:     make(chan *writeReq),
 		recvBuf:     make([][]byte, 0),
 	}
 	go s.open()
 	return s
-}
-
-func (s *Session) accept() {
-	// TODO: sync
-
-	ctx := context.TODO()
-	go s.sender(ctx)
-	s.receiver(ctx)
 }
 
 func (s *Session) open() {
@@ -71,17 +71,22 @@ func (s *Session) sender(ctx context.Context) {
 
 	for w := range s.sendBuf {
 		if atomic.LoadInt32(&s.isclose) == 1 {
+			w.writeError.Store(fmt.Errorf("session close"))
+			close(w.chWriteError)
 			return
 		}
 
-		s.SetWriteDeadline(time.Now().Add(time.Second * 5))
-		_, err := s.conn.Write(w)
-		s.SetWriteDeadline(time.Time{})
+		nw, err := s.conn.Write(w.buf)
 		if err != nil {
-			log.Println(err)
+			w.writeError.Store(err)
+			close(w.chWriteError)
 			return
 		}
+
+		w.nwrite = nw
+		close(w.chWriteSuccess)
 	}
+
 }
 
 func (s *Session) receiver(ctx context.Context) {
@@ -137,6 +142,7 @@ errexit:
 }
 
 func (s *Session) heartbeat(ctx context.Context) {
+	defer func() { atomic.StoreInt32(&s.isclose, 1) }()
 	tc := time.NewTicker(time.Second * 2)
 	defer tc.Stop()
 
@@ -146,7 +152,11 @@ func (s *Session) heartbeat(ctx context.Context) {
 			break
 		}
 
-		s.sendBuf <- hb[:]
+		_, err := s.write(hb[:])
+		if err != nil {
+			log.Println(err)
+			return
+		}
 	}
 }
 
@@ -204,8 +214,28 @@ func (s *Session) Write(buf []byte) (int, error) {
 	binary.BigEndian.PutUint16(blen, uint16(len(buf)))
 	writes = append(writes, blen...)
 	writes = append(writes, buf...)
-	s.sendBuf <- writes
-	return -1, nil
+
+	return s.write(writes)
+}
+
+func (s *Session) write(writes []byte) (int, error) {
+	req := &writeReq{
+		buf:            writes,
+		chWriteSuccess: make(chan struct{}),
+		chWriteError:   make(chan struct{}),
+	}
+
+	s.sendBuf <- req
+
+	select {
+	case <-req.chWriteSuccess:
+		close(req.chWriteError)
+		return req.nwrite, nil
+
+	case <-req.chWriteError:
+		close(req.chWriteSuccess)
+		return -1, req.writeError.Load().(error)
+	}
 }
 
 func (s *Session) Close() error {

@@ -6,14 +6,6 @@ const (
 	cmd_data
 )
 
-func decode() (byte, []byte, error) {
-	return 0, nil, nil
-}
-
-func encode(cmd byte, body []byte) error {
-	return nil
-}
-
 type hdr [4]byte
 
 func (h hdr) cmd() int {
